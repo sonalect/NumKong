@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn main() {
     build_numkong().expect("Failed to build NumKong");
@@ -34,6 +34,23 @@ fn watch_dir(dir: &str) {
             println!("cargo:rerun-if-changed={}", p.display());
         }
     }
+}
+
+/// Recursively copy `src` into `dst` so dependents can include headers from
+/// OUT_DIR (visible in Bazel sandboxes).
+fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 struct IsaProbe {
@@ -468,8 +485,14 @@ fn build_numkong() -> Result<HashMap<String, bool>, String> {
     build.compile("numkong");
 
     // Expose the include directory so dependents can find <numkong/numkong.h>
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    println!("cargo:include={}/include", manifest_dir);
+    // Copy into OUT_DIR: Bazel sandboxes hide CARGO_MANIFEST_DIR of this crate
+    // from usearch's C++ compile. rules_rust rewrites cargo:include under
+    // OUT_DIR so DEP_NUMKONG_INCLUDE is an action input of dependents.
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").map_err(|e| e.to_string())?;
+    let include_src = Path::new(&manifest_dir).join("include");
+    let include_dst = PathBuf::from(env::var("OUT_DIR").map_err(|e| e.to_string())?).join("include");
+    copy_dir(&include_src, &include_dst)?;
+    println!("cargo:include={}", include_dst.display());
 
     // Watch directories recursively instead of listing individual files
     watch_dir("c");
